@@ -1,7 +1,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const { DigitalPaye } = require('digitalpaye-node');
 
 // Initialisation Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -13,9 +12,6 @@ admin.initializeApp({
 const DP_PUBLIC_KEY = process.env.DIGITALPAYE_PUBLIC_KEY;
 const DP_SECRET = process.env.DIGITALPAYE_SECRET;
 const DP_BASE_URL = 'https://api.digitalpaye.com/v1';
-
-// Initialisation SDK DigitalPaye (gère l'auth automatiquement)
-const dp = new DigitalPaye(DP_PUBLIC_KEY, DP_SECRET);
 
 const app = express();
 app.use(express.json());
@@ -91,16 +87,28 @@ app.post('/withdraw', async (req, res) => {
 
     const externalRef = `WITHDRAW_${Date.now()}`;
 
-    // Utilisation du SDK DigitalPaye (auth automatique)
-    const result = await dp.payouts.create({
-      amount: amount,
-      currency: 'XOF',
-      operator_code: operator,
-      external_ref: externalRef,
-      recipient_phone: phone,
-    });
+    // Authentification Basic (publicKey:secret en base64)
+    const basicAuth = Buffer.from(`${DP_PUBLIC_KEY}:${DP_SECRET}`).toString('base64');
 
-    console.log('Reponse DigitalPaye:', JSON.stringify(result));
+    const response = await axios.post(
+      `${DP_BASE_URL}/payouts`,
+      {
+        amount: amount,
+        currency: 'XOF',
+        operator_code: operator,
+        external_ref: externalRef,
+        recipient_phone: phone,
+        country: 'CI',
+      },
+      {
+        headers: {
+          'Authorization': `Basic ${basicAuth}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('Reponse DigitalPaye:', response.data);
 
     const newBalance = currentBalance - amount;
     await walletRef.update({
@@ -121,8 +129,8 @@ app.post('/withdraw', async (req, res) => {
 
     return res.status(200).send('Retrait initie avec succes');
   } catch (error) {
-    console.error('Erreur withdraw:', error.message || error);
-    return res.status(500).send('Erreur : ' + (error.message || 'Erreur inconnue'));
+    console.error('Erreur withdraw:', error.response?.data || error.message);
+    return res.status(500).send('Erreur : ' + (error.response?.data?.message || error.message));
   }
 });
 
