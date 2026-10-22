@@ -87,39 +87,23 @@ app.post('/withdraw', async (req, res) => {
 
     const externalRef = `WITHDRAW_${Date.now()}`;
 
-    // 1. Obtenir le token
-    const token = await getDigitalPayeToken();
-    console.log('Token DigitalPaye obtenu');
+    // Utilisation du SDK DigitalPaye (auth automatique)
+    const result = await dp.payouts.create({
+      amount: amount,
+      currency: 'XOF',
+      operator_code: operator,
+      external_ref: externalRef,
+      recipient_phone: phone,
+    });
 
-    // 2. Faire le payout
-    const response = await axios.post(
-      'https://api.digitalpaye.com/v1/payouts',
-      {
-        amount: amount,
-        currency: 'XOF',
-        operator_code: operator,
-        external_ref: externalRef,
-        recipient_phone: phone,
-        country: 'CI',
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    console.log('Reponse DigitalPaye:', JSON.stringify(result));
 
-    console.log('Reponse DigitalPaye:', response.data);
-
-    // 3. Deduire du wallet
     const newBalance = currentBalance - amount;
     await walletRef.update({
       balance: newBalance,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // 4. Creer transaction
     const txRef = walletRef.collection('transactions').doc();
     await txRef.set({
       id: txRef.id,
@@ -133,8 +117,8 @@ app.post('/withdraw', async (req, res) => {
 
     return res.status(200).send('Retrait initie avec succes');
   } catch (error) {
-    console.error('Erreur withdraw:', error.response?.data || error.message);
-    return res.status(500).send('Erreur : ' + (error.response?.data?.message || error.message));
+    console.error('Erreur withdraw:', error.message || error);
+    return res.status(500).send('Erreur : ' + (error.message || 'Erreur inconnue'));
   }
 });
 
