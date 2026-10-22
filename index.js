@@ -155,6 +155,41 @@ app.post('/webhook/digitalpaye', async (req, res) => {
   }
 });
 
+
+app.post('/payOrder', async (req, res) => {
+  const { userId, amount, orderId } = req.body;
+  if (!userId || !amount) return res.status(400).send('Parametres manquants');
+
+  try {
+    const walletRef = admin.firestore().collection('deals_wallets').doc(userId);
+    const walletDoc = await walletRef.get();
+    if (!walletDoc.exists) return res.status(404).send('Wallet introuvable');
+
+    const currentBalance = walletDoc.data().balance || 0;
+    if (currentBalance < amount) return res.status(400).send('Solde insuffisant');
+
+    const newBalance = currentBalance - amount;
+    await walletRef.update({
+      balance: newBalance,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const txRef = walletRef.collection('transactions').doc();
+    await txRef.set({
+      id: txRef.id,
+      type: 'debit',
+      amount: amount,
+      description: `Paiement commande #${orderId || 'N/A'}`,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'success',
+    });
+
+    return res.status(200).send('Paiement valide');
+  } catch (error) {
+    return res.status(500).send('Erreur : ' + error.message);
+  }
+});
+
 app.get('/', (req, res) => res.send('Flash Deals Server is running'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
