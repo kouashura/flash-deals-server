@@ -55,9 +55,27 @@ app.post('/creditWallet', async (req, res) => {
 // ============================================================
 // ROUTE 2 : RETRAIT DU WALLET (DigitalPaye REST)
 // ============================================================
+// Fonction pour obtenir un token DigitalPaye
+async function getDigitalPayeToken() {
+  const basicAuth = Buffer.from(`${DP_PUBLIC_KEY}:${DP_SECRET}`).toString('base64');
+  const response = await axios.post(
+    'https://api.digitalpaye.com/v1/auth/token',
+    {},
+    {
+      headers: {
+        'Authorization': `Basic ${basicAuth}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  return response.data.token || response.data.access_token;
+}
+
 app.post('/withdraw', async (req, res) => {
   const { userId, amount, phone, operator } = req.body;
-  if (!userId || !amount || !phone || !operator) return res.status(400).send('Paramètres manquants');
+  if (!userId || !amount || !phone || !operator) {
+    return res.status(400).send('Parametres manquants');
+  }
 
   try {
     const walletRef = admin.firestore().collection('deals_wallets').doc(userId);
@@ -69,9 +87,13 @@ app.post('/withdraw', async (req, res) => {
 
     const externalRef = `WITHDRAW_${Date.now()}`;
 
-    // Appel REST DigitalPaye
+    // 1. Obtenir le token
+    const token = await getDigitalPayeToken();
+    console.log('Token DigitalPaye obtenu');
+
+    // 2. Faire le payout
     const response = await axios.post(
-      `${DP_BASE_URL}/payouts`,
+      'https://api.digitalpaye.com/v1/payouts',
       {
         amount: amount,
         currency: 'XOF',
@@ -82,34 +104,40 @@ app.post('/withdraw', async (req, res) => {
       },
       {
         headers: {
-          'Authorization': `Bearer ${DP_SECRET}`,
-          'X-Public-Key': DP_PUBLIC_KEY,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       }
     );
 
-    console.log('Réponse DigitalPaye:', response.data);
+    console.log('Reponse DigitalPaye:', response.data);
 
+    // 3. Deduire du wallet
     const newBalance = currentBalance - amount;
-    await walletRef.update({ balance: newBalance, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-
-    const txRef = walletRef.collection('transactions').doc();
-    await txRef.set({
-      id: txRef.id, type: 'debit', amount, description: `Retrait vers ${operator}`,
-      date: admin.firestore.FieldValue.serverTimestamp(), status: 'pending', externalRef,
+    await walletRef.update({
+      balance: newBalance,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return res.status(200).send('Retrait initié avec succès');
+    // 4. Creer transaction
+    const txRef = walletRef.collection('transactions').doc();
+    await txRef.set({
+      id: txRef.id,
+      type: 'debit',
+      amount: amount,
+      description: `Retrait vers ${operator}`,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'pending',
+      externalRef: externalRef,
+    });
+
+    return res.status(200).send('Retrait initie avec succes');
   } catch (error) {
     console.error('Erreur withdraw:', error.response?.data || error.message);
     return res.status(500).send('Erreur : ' + (error.response?.data?.message || error.message));
   }
 });
 
-// ============================================================
-// ROUTE 3 : WEBHOOK DIGITALPAYE
-// ============================================================
 app.post('/webhook/digitalpaye', async (req, res) => {
   try {
     const event = req.body;
