@@ -1,6 +1,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
-const { DigitalPaye } = require('digitalpaye-node');
+const axios = require('axios');
 
 // Initialisation Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -8,11 +8,10 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-// Initialisation DigitalPaye
-const dp = new DigitalPaye(
-  process.env.DIGITALPAYE_PUBLIC_KEY,
-  process.env.DIGITALPAYE_SECRET
-);
+// Configuration DigitalPaye (REST API)
+const DP_PUBLIC_KEY = process.env.DIGITALPAYE_PUBLIC_KEY;
+const DP_SECRET = process.env.DIGITALPAYE_SECRET;
+const DP_BASE_URL = 'https://api.digitalpaye.com/v1';
 
 const app = express();
 app.use(express.json());
@@ -24,30 +23,16 @@ app.use(express.urlencoded({ extended: true }));
 app.post('/creditWallet', async (req, res) => {
   try {
     const data = req.body;
-    console.log('Notification PaiementPro:', JSON.stringify(data));
-
     if (data.responsecode !== '0') {
       return res.status(200).send('OK - Paiement échoué');
     }
-
     let userId = null;
     if (data.returnContext) {
-      try {
-        const context = JSON.parse(data.returnContext);
-        userId = context.userId;
-      } catch (e) {
-        console.error('Erreur parsing returnContext:', e);
-      }
+      try { userId = JSON.parse(data.returnContext).userId; } catch (e) {}
     }
-
     if (!userId) return res.status(400).send('userId manquant');
-
-    const txRef = admin.firestore()
-      .collection('deals_wallets')
-      .doc(userId)
-      .collection('transactions')
-      .doc(data.referenceNumber);
-
+    
+    const txRef = admin.firestore().collection('deals_wallets').doc(userId).collection('transactions').doc(data.referenceNumber);
     const existingTx = await txRef.get();
     if (existingTx.exists) return res.status(200).send('Déjà traité');
 
@@ -57,23 +42,9 @@ app.post('/creditWallet', async (req, res) => {
     const currentBalance = walletDoc.exists ? (walletDoc.data().balance || 0) : 0;
 
     await admin.firestore().runTransaction(async (transaction) => {
-      transaction.set(walletRef, {
-        balance: currentBalance + amount,
-        currency: 'XOF',
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      transaction.set(txRef, {
-        id: data.referenceNumber,
-        type: 'credit',
-        amount: amount,
-        description: 'Recharge PaiementPro',
-        date: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'success',
-      });
+      transaction.set(walletRef, { balance: currentBalance + amount, currency: 'XOF', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      transaction.set(txRef, { id: data.referenceNumber, type: 'credit', amount, description: 'Recharge PaiementPro', date: admin.firestore.FieldValue.serverTimestamp(), status: 'success' });
     });
-
-    console.log(`✅ Wallet ${userId} crédité de ${amount} FCFA`);
     return res.status(200).send('OK - Wallet crédité');
   } catch (error) {
     console.error('Erreur creditWallet:', error);
@@ -82,61 +53,56 @@ app.post('/creditWallet', async (req, res) => {
 });
 
 // ============================================================
-// ROUTE 2 : RETRAIT DU WALLET (DigitalPaye)
+// ROUTE 2 : RETRAIT DU WALLET (DigitalPaye REST)
 // ============================================================
 app.post('/withdraw', async (req, res) => {
   const { userId, amount, phone, operator } = req.body;
-
-  if (!userId || !amount || !phone || !operator) {
-    return res.status(400).send('Paramètres manquants');
-  }
+  if (!userId || !amount || !phone || !operator) return res.status(400).send('Paramètres manquants');
 
   try {
     const walletRef = admin.firestore().collection('deals_wallets').doc(userId);
     const walletDoc = await walletRef.get();
-
-    if (!walletDoc.exists) {
-      return res.status(404).send('Wallet introuvable');
-    }
+    if (!walletDoc.exists) return res.status(404).send('Wallet introuvable');
 
     const currentBalance = walletDoc.data().balance || 0;
-    if (currentBalance < amount) {
-      return res.status(400).send('Solde insuffisant');
-    }
+    if (currentBalance < amount) return res.status(400).send('Solde insuffisant');
 
     const externalRef = `WITHDRAW_${Date.now()}`;
 
-    const result = await dp.payouts.create({
-      amount: amount,
-      currency: 'XOF',
-      operator_code: operator,
-      external_ref: externalRef,
-      recipient_phone: phone,
-    });
+    // Appel REST DigitalPaye
+    const response = await axios.post(
+      `${DP_BASE_URL}/payouts`,
+      {
+        amount: amount,
+        currency: 'XOF',
+        operator_code: operator,
+        external_ref: externalRef,
+        recipient_phone: phone,
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${DP_SECRET}`,
+          'X-Public-Key': DP_PUBLIC_KEY,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
 
-    console.log('Réponse DigitalPaye:', JSON.stringify(result));
+    console.log('Réponse DigitalPaye:', response.data);
 
     const newBalance = currentBalance - amount;
-    await walletRef.update({
-      balance: newBalance,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    await walletRef.update({ balance: newBalance, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
 
     const txRef = walletRef.collection('transactions').doc();
     await txRef.set({
-      id: txRef.id,
-      type: 'debit',
-      amount: amount,
-      description: `Retrait vers ${operator}`,
-      date: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'pending',
-      externalRef: externalRef,
+      id: txRef.id, type: 'debit', amount, description: `Retrait vers ${operator}`,
+      date: admin.firestore.FieldValue.serverTimestamp(), status: 'pending', externalRef,
     });
 
     return res.status(200).send('Retrait initié avec succès');
   } catch (error) {
-    console.error('Erreur withdraw:', error);
-    return res.status(500).send('Erreur : ' + error.message);
+    console.error('Erreur withdraw:', error.response?.data || error.message);
+    return res.status(500).send('Erreur : ' + (error.response?.data?.message || error.message));
   }
 });
 
@@ -147,28 +113,16 @@ app.post('/webhook/digitalpaye', async (req, res) => {
   try {
     const event = req.body;
     console.log('Webhook DigitalPaye:', JSON.stringify(event));
-
     const externalRef = event.data?.external_ref;
-    const status = event.event === 'payout.success' ? 'success'
-                 : event.event === 'payout.failed' ? 'failed'
-                 : null;
+    const status = event.event === 'payout.success' ? 'success' : event.event === 'payout.failed' ? 'failed' : null;
 
     if (externalRef && status) {
-      const walletsSnapshot = await admin.firestore().collection('deals_wallets').get();
-      for (const walletDoc of walletsSnapshot.docs) {
-        const txQuery = await walletDoc.ref
-          .collection('transactions')
-          .where('externalRef', '==', externalRef)
-          .get();
-
-        if (!txQuery.empty) {
-          await txQuery.docs[0].ref.update({ status: status });
-          console.log(`✅ Transaction ${externalRef} → ${status}`);
-          break;
-        }
+      const wallets = await admin.firestore().collection('deals_wallets').get();
+      for (const w of wallets.docs) {
+        const q = await w.ref.collection('transactions').where('externalRef', '==', externalRef).get();
+        if (!q.empty) { await q.docs[0].ref.update({ status }); break; }
       }
     }
-
     return res.status(200).send('OK');
   } catch (error) {
     console.error('Erreur webhook:', error);
@@ -176,10 +130,6 @@ app.post('/webhook/digitalpaye', async (req, res) => {
   }
 });
 
-// ============================================================
-// ROUTE DE TEST
-// ============================================================
 app.get('/', (req, res) => res.send('Flash Deals Server is running'));
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
