@@ -78,6 +78,7 @@ app.post('/withdraw', async (req, res) => {
         operator_code: operator,
         external_ref: externalRef,
         recipient_phone: phone,
+        country: 'CI',
       },
       {
         headers: {
