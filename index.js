@@ -1,6 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const axios = require('axios');
+const { DigitalPaye } = require('digitalpaye-node');
 
 // Initialisation Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -12,6 +13,9 @@ admin.initializeApp({
 const DP_PUBLIC_KEY = process.env.DIGITALPAYE_PUBLIC_KEY;
 const DP_SECRET = process.env.DIGITALPAYE_SECRET;
 const DP_BASE_URL = 'https://api.digitalpaye.com/v1';
+
+// Initialisation SDK DigitalPaye (gère l'auth automatiquement)
+const dp = new DigitalPaye(DP_PUBLIC_KEY, DP_SECRET);
 
 const app = express();
 app.use(express.json());
