@@ -1,18 +1,26 @@
 const express = require('express');
 const admin = require('firebase-admin');
+const { DigitalPaye } = require('digitalpaye-node');
 
-// Initialisation Firebase Admin avec la variable d'environnement
+// Initialisation Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
+
+// Initialisation DigitalPaye
+const dp = new DigitalPaye(
+  process.env.DIGITALPAYE_PUBLIC_KEY,
+  process.env.DIGITALPAYE_SECRET
+);
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Route appelée par PaiementPro
+// ============================================================
+// ROUTE 1 : CRÉDIT DU WALLET (PaiementPro)
+// ============================================================
 app.post('/creditWallet', async (req, res) => {
   try {
     const data = req.body;
@@ -73,6 +81,104 @@ app.post('/creditWallet', async (req, res) => {
   }
 });
 
+// ============================================================
+// ROUTE 2 : RETRAIT DU WALLET (DigitalPaye)
+// ============================================================
+app.post('/withdraw', async (req, res) => {
+  const { userId, amount, phone, operator } = req.body;
+
+  if (!userId || !amount || !phone || !operator) {
+    return res.status(400).send('Paramètres manquants');
+  }
+
+  try {
+    const walletRef = admin.firestore().collection('deals_wallets').doc(userId);
+    const walletDoc = await walletRef.get();
+
+    if (!walletDoc.exists) {
+      return res.status(404).send('Wallet introuvable');
+    }
+
+    const currentBalance = walletDoc.data().balance || 0;
+    if (currentBalance < amount) {
+      return res.status(400).send('Solde insuffisant');
+    }
+
+    const externalRef = `WITHDRAW_${Date.now()}`;
+
+    const result = await dp.payouts.create({
+      amount: amount,
+      currency: 'XOF',
+      operator_code: operator,
+      external_ref: externalRef,
+      recipient_phone: phone,
+    });
+
+    console.log('Réponse DigitalPaye:', JSON.stringify(result));
+
+    const newBalance = currentBalance - amount;
+    await walletRef.update({
+      balance: newBalance,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const txRef = walletRef.collection('transactions').doc();
+    await txRef.set({
+      id: txRef.id,
+      type: 'debit',
+      amount: amount,
+      description: `Retrait vers ${operator}`,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'pending',
+      externalRef: externalRef,
+    });
+
+    return res.status(200).send('Retrait initié avec succès');
+  } catch (error) {
+    console.error('Erreur withdraw:', error);
+    return res.status(500).send('Erreur : ' + error.message);
+  }
+});
+
+// ============================================================
+// ROUTE 3 : WEBHOOK DIGITALPAYE
+// ============================================================
+app.post('/webhook/digitalpaye', async (req, res) => {
+  try {
+    const event = req.body;
+    console.log('Webhook DigitalPaye:', JSON.stringify(event));
+
+    const externalRef = event.data?.external_ref;
+    const status = event.event === 'payout.success' ? 'success'
+                 : event.event === 'payout.failed' ? 'failed'
+                 : null;
+
+    if (externalRef && status) {
+      const walletsSnapshot = await admin.firestore().collection('deals_wallets').get();
+      for (const walletDoc of walletsSnapshot.docs) {
+        const txQuery = await walletDoc.ref
+          .collection('transactions')
+          .where('externalRef', '==', externalRef)
+          .get();
+
+        if (!txQuery.empty) {
+          await txQuery.docs[0].ref.update({ status: status });
+          console.log(`✅ Transaction ${externalRef} → ${status}`);
+          break;
+        }
+      }
+    }
+
+    return res.status(200).send('OK');
+  } catch (error) {
+    console.error('Erreur webhook:', error);
+    return res.status(500).send('Erreur serveur');
+  }
+});
+
+// ============================================================
+// ROUTE DE TEST
+// ============================================================
 app.get('/', (req, res) => res.send('Flash Deals Server is running'));
 
 const PORT = process.env.PORT || 3000;
